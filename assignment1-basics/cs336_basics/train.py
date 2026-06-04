@@ -1,23 +1,74 @@
-from adapters import AdamW, run_get_batch, run_transformer_lm, TransformerLM, run_cross_entropy, run_save_checkpoint
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tests'))
+from adapters import AdamW, run_get_batch, run_transformer_lm, TransformerLM, run_cross_entropy, run_save_checkpoint, run_train_bpe, Tokenizer
 import numpy as np
 import torch
 
 import torch.nn.functional as F
+import pickle
 
-model = TransformerLM(...) # TODO: inintal transformerLM here
+
+# do the tokenizer first 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+bin_path = os.path.join(BASE_DIR, "data", "owt_valid_tokens.bin")
+input_path = os.path.join(BASE_DIR, "data", "owt_valid.txt")
+vocab_size = 500
+CONTEXT_LENGTH = 80
+d_model = 100
+num_layers = 1
+num_heads = 3
+d_ff = 120
+DEVICE = 'cpu'
+rope_theta = 0.3
+
+
+
+vocab_path = os.path.join(BASE_DIR, "data", "vocab.pkl")
+bin_path = os.path.join(BASE_DIR, "data", "owt_valid_tokens.bin")
+
+if not os.path.exists(bin_path):
+    print("step 1: starting BPE training...")
+    vocab, merges = run_train_bpe(
+        input_path=input_path,
+        vocab_size=vocab_size,
+        special_tokens=["<|endoftext|>"],
+    )
+    # vocab/merges 也存下来
+    with open(vocab_path, "wb") as f:
+        pickle.dump({"vocab": vocab, "merges": merges}, f)
+
+    myTokenizer = Tokenizer(vocab, merges, ["<|endoftext|>"])
+    print("step 2: BPE done, encoding text...")
+    with open(input_path, "r") as f:
+        text = f.read()
+    token_ids = myTokenizer.encode(text)
+    print(f"step 3: encoding done, {len(token_ids)} tokens")
+    token_array = np.array(token_ids, dtype=np.int32)
+    token_array.tofile(bin_path)
+    print(f"step 4: saved to {bin_path}")
+else:
+    print("token file already exists, loading vocab...")
+    with open(vocab_path, "rb") as f:
+        data = pickle.load(f)
+    vocab, merges = data["vocab"], data["merges"]
+    myTokenizer = Tokenizer(vocab, merges, ["<|endoftext|>"])
+    print("done tokenizer")
+
+
+model = TransformerLM(vocab_size, CONTEXT_LENGTH, d_model,
+                    num_layers, num_heads, d_ff, rope_theta)
+model.to(DEVICE)
 optimizer = AdamW(model.parameters())
 
 def train(model, optimizer, train_path, val_path, max_steps, log_interval, eval_interval, save_interval, save_path):
     # TODO: change these to var
     BATCH_SIZE = 20
     TEST_BATCH_SIZE = 80
-    CONTEXT_LENGTH = 100
-    DEVICE = 'cpu'
 
     # train_path = "" # fill in the real path 
     # val_path = ""
-    train_data = np.memmap(train_path, dtype=np.uint16, mode="r") 
-    val_data = np.memmap(val_path, dtype=np.uint16, mode="r") 
+    train_data = np.memmap(train_path, dtype=np.int32, mode="r") 
+    val_data = np.memmap(val_path,dtype=np.int32, mode="r") 
 
     for step in range(max_steps):
         model.train()
@@ -124,3 +175,17 @@ def decode(
                 break
 
     return tokens
+
+
+
+print("step 4: starting training loop...")
+train(
+    model, optimizer,
+    train_path=os.path.join(BASE_DIR, "data", "owt_valid_tokens.bin"),
+    val_path=os.path.join(BASE_DIR, "data", "owt_valid_tokens.bin"),
+    max_steps=100,
+    log_interval=2,
+    eval_interval=10,
+    save_interval=10,
+    save_path="./checkpoints"
+)
