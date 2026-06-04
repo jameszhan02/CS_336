@@ -13,11 +13,11 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 bin_path = os.path.join(BASE_DIR, "data", "owt_valid_tokens.bin")
 input_path = os.path.join(BASE_DIR, "data", "owt_valid.txt")
 vocab_size = 500
-CONTEXT_LENGTH = 80
-d_model = 100
-num_layers = 1
-num_heads = 3
-d_ff = 120
+CONTEXT_LENGTH = 200
+d_model = 200
+num_layers = 2
+num_heads = 5
+d_ff = 400
 DEVICE = 'cpu'
 rope_theta = 0.3
 
@@ -61,6 +61,7 @@ model.to(DEVICE)
 optimizer = AdamW(model.parameters())
 
 def train(model, optimizer, train_path, val_path, max_steps, log_interval, eval_interval, save_interval, save_path):
+    os.makedirs(save_path, exist_ok=True) 
     # TODO: change these to var
     BATCH_SIZE = 20
     TEST_BATCH_SIZE = 80
@@ -76,7 +77,11 @@ def train(model, optimizer, train_path, val_path, max_steps, log_interval, eval_
         train_x, train_y = run_get_batch(train_data, BATCH_SIZE, CONTEXT_LENGTH, DEVICE)
         # 2. forward pass + loss
         logits = model(train_x)
-        loss = run_cross_entropy(logits, train_y)
+        batch, seq_len, vocab = logits.shape
+        loss = run_cross_entropy(
+            logits.reshape(batch * seq_len, vocab),
+            train_y.reshape(batch * seq_len)
+        )
         
         # 3. backprop + optimizer step
         optimizer.zero_grad()   # clear gradients from last step
@@ -91,7 +96,11 @@ def train(model, optimizer, train_path, val_path, max_steps, log_interval, eval_
             with torch.no_grad():   # don't compute gradients during eval
                 val_x, val_y = run_get_batch(val_data, TEST_BATCH_SIZE, CONTEXT_LENGTH, DEVICE)
                 val_logits = model(val_x)
-                val_loss = run_cross_entropy(val_logits, val_y)
+                batch, seq_len, vocab = val_logits.shape
+                val_loss = run_cross_entropy(
+                    val_logits.reshape(batch * seq_len, vocab),
+                    val_y.reshape(batch * seq_len)
+                )
             print(f"step {step} | val loss: {val_loss.item():.4f}")
             model.train()  # switch back to train mode
         
@@ -156,7 +165,9 @@ def decode(
 
     with torch.no_grad():
         for _ in range(max_new_tokens):
-            x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
+            context = tokens[-CONTEXT_LENGTH:]
+            x = torch.tensor(context, dtype=torch.long, device=device).unsqueeze(0)
+            # x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
 
             logits = model(x)           # (1, sequence_length, vocab_size)
             logits = logits[0, -1, :]   # (vocab_size,)
@@ -183,9 +194,32 @@ train(
     model, optimizer,
     train_path=os.path.join(BASE_DIR, "data", "owt_valid_tokens.bin"),
     val_path=os.path.join(BASE_DIR, "data", "owt_valid_tokens.bin"),
-    max_steps=100,
-    log_interval=2,
-    eval_interval=10,
-    save_interval=10,
+    max_steps=1000,
+    log_interval=100,
+    eval_interval=50,
+    save_interval=100,
     save_path="./checkpoints"
 )
+
+
+
+prompt = "The quick brown fox"
+prompt_tokens = myTokenizer.encode(prompt)
+
+eos_token_id = myTokenizer.encode("<|endoftext|>")[0]
+
+output_tokens = decode(
+    model=model,
+    prompt_tokens=prompt_tokens,
+    max_new_tokens=400,
+    temperature=0.8,
+    p=0.9,
+    eos_token_id=eos_token_id,
+    device=DEVICE
+)
+
+generated_tokens = output_tokens[len(prompt_tokens):]
+generated_text = myTokenizer.decode(generated_tokens)
+
+print(f"\nPrompt: {prompt}")
+print(f"Generated: {generated_text}")
