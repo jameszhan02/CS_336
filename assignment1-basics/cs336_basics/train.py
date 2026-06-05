@@ -10,42 +10,54 @@ import pickle
 
 # do the tokenizer first 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-bin_path = os.path.join(BASE_DIR, "data", "owt_valid_tokens.bin")
-input_path = os.path.join(BASE_DIR, "data", "owt_valid.txt")
-vocab_size = 500
-CONTEXT_LENGTH = 200
-d_model = 200
-num_layers = 2
-num_heads = 5
-d_ff = 400
-DEVICE = 'cpu'
-rope_theta = 0.3
+# bin_path = os.path.join(BASE_DIR, "data", "owt_valid_tokens.bin")
+train_input_path = os.path.join(BASE_DIR, "data", "TinyStoriesV2-GPT4-train.txt")
+train_bin_path = os.path.join(BASE_DIR, "data", "TinyStoriesV2-GPT4-train.txt.bin")
+valid_input_path = os.path.join(BASE_DIR, "data", "TinyStoriesV2-GPT4-valid.txt")
+valid_bin_path = os.path.join(BASE_DIR, "data", "TinyStoriesV2-GPT4-valid.txt.bin")
+
+vocab_size = 10000
+CONTEXT_LENGTH = 256
+d_model = 256
+num_layers = 4
+num_heads = 4
+d_ff = 672
+if torch.cuda.is_available():
+    DEVICE = 'cuda'
+elif torch.backends.mps.is_available():
+    DEVICE = 'mps'
+else:
+    DEVICE = 'cpu'
+rope_theta = 10000
 
 
 
 vocab_path = os.path.join(BASE_DIR, "data", "vocab.pkl")
-bin_path = os.path.join(BASE_DIR, "data", "owt_valid_tokens.bin")
 
-if not os.path.exists(bin_path):
+if not os.path.exists(train_bin_path):
     print("step 1: starting BPE training...")
     vocab, merges = run_train_bpe(
-        input_path=input_path,
+        input_path=train_input_path,
         vocab_size=vocab_size,
         special_tokens=["<|endoftext|>"],
     )
-    # vocab/merges 也存下来
     with open(vocab_path, "wb") as f:
         pickle.dump({"vocab": vocab, "merges": merges}, f)
 
     myTokenizer = Tokenizer(vocab, merges, ["<|endoftext|>"])
     print("step 2: BPE done, encoding text...")
-    with open(input_path, "r") as f:
-        text = f.read()
-    token_ids = myTokenizer.encode(text)
-    print(f"step 3: encoding done, {len(token_ids)} tokens")
-    token_array = np.array(token_ids, dtype=np.int32)
-    token_array.tofile(bin_path)
-    print(f"step 4: saved to {bin_path}")
+    with open(train_input_path, "r") as f:
+        train_text = f.read()
+    train_token_ids = myTokenizer.encode(train_text)
+    with open(valid_input_path, "r") as f:
+        valid_text = f.read()
+    valid_token_ids = myTokenizer.encode(valid_text)
+    print(f"step 3: encoding done, {len(train_token_ids)} train tokens | {len(train_token_ids)} valid tokens")
+    train_token_array = np.array(train_token_ids, dtype=np.int32)
+    train_token_array.tofile(train_bin_path)
+    valid_token_array = np.array(valid_token_ids, dtype=np.int32)
+    train_token_array.tofile(valid_bin_path)
+    print(f"step 4: saved to {train_bin_path} {valid_bin_path}")
 else:
     print("token file already exists, loading vocab...")
     with open(vocab_path, "rb") as f:
@@ -63,7 +75,7 @@ optimizer = AdamW(model.parameters())
 def train(model, optimizer, train_path, val_path, max_steps, log_interval, eval_interval, save_interval, save_path):
     os.makedirs(save_path, exist_ok=True) 
     # TODO: change these to var
-    BATCH_SIZE = 20
+    BATCH_SIZE = 32
     TEST_BATCH_SIZE = 80
 
     # train_path = "" # fill in the real path 
@@ -192,8 +204,8 @@ def decode(
 print("step 4: starting training loop...")
 train(
     model, optimizer,
-    train_path=os.path.join(BASE_DIR, "data", "owt_valid_tokens.bin"),
-    val_path=os.path.join(BASE_DIR, "data", "owt_valid_tokens.bin"),
+    train_path=train_input_path,
+    val_path=valid_input_path,
     max_steps=1000,
     log_interval=100,
     eval_interval=50,
