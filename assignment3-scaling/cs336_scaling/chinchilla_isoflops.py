@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
 
 df = pd.read_json('data/isoflops_curves.json')
 # print(df)
@@ -26,16 +27,24 @@ print(C)
 print(N)
 print(D)
 
-logC = np.log(C)
-logN = np.log(N)
-logD = np.log(D)
+logC = np.log10(C)
+logN = np.log10(N)
+logD = np.log10(D)
 
 print(logC)
 print(logN)
 print(logD)
 
-def power_law(C, a, alpha):
-    return a * (C ** alpha)
+logC = logC.reshape(-1, 1)
+model_N = LinearRegression()
+model_N.fit(logC, logN)
+
+
+model_D = LinearRegression()
+model_D.fit(logC, logD)
+
+
+
 
 
 # !!!!!!!!!! IMPLEMENT WITHOUT LOG SCALE !!!!!!!!!!!
@@ -50,31 +59,13 @@ def power_law(C, a, alpha):
 # print("b =", b)
 # print("beta =", beta)
 
-# C_test = np.array([1e23, 1e24])
+C_test = np.array([np.log10(1e23), np.log10(1e24)])
+C_test = C_test.reshape(-1, 1)
+N_pred = model_N.predict(C_test)
+D_pred = model_D.predict(C_test)
 
-# N_pred = power_law(C_test, a, alpha)
-# D_pred = power_law(C_test, b, beta)
+print("N(1e23) =", 10**N_pred[0])
+print("N(1e24) =", 10**N_pred[1])
 
-# print("N(1e23) =", N_pred[0])
-# print("N(1e24) =", N_pred[1])
-
-# print("D(1e23) =", D_pred[0])
-# print("D(1e24) =", D_pred[1])
-
-# C_sorted = np.sort(C)
-# N_pred = power_law(C_sorted, a, alpha)
-
-# plt.figure(figsize=(8,5))
-
-# # 原始点
-# plt.scatter(C, N, label="data points")
-
-# # 拟合曲线
-# plt.plot(C_sorted, N_pred, color="red", label="curve_fit")
-
-# plt.xlabel("Compute budget C")
-# plt.ylabel("Optimal parameters N*")
-# plt.title("Power Law Fit: N = a C^alpha")
-
-# plt.legend()
-# plt.show()
+print("D(1e23) =", 10**D_pred[0])
+print("D(1e24) =", 10**D_pred[1])
