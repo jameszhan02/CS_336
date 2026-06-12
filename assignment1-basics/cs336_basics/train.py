@@ -11,7 +11,7 @@ import pickle
 # do the tokenizer first 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # bin_path = os.path.join(BASE_DIR, "data", "owt_valid_tokens.bin")
-train_input_path = os.path.join(BASE_DIR, "data", "TinyStoriesV2-GPT4-train.txt")
+train_input_path = os.path.join(BASE_DIR, "data", "TinyStories_small.txt")
 train_bin_path = os.path.join(BASE_DIR, "data", "TinyStoriesV2-GPT4-train.txt.bin")
 valid_input_path = os.path.join(BASE_DIR, "data", "TinyStoriesV2-GPT4-valid.txt")
 valid_bin_path = os.path.join(BASE_DIR, "data", "TinyStoriesV2-GPT4-valid.txt.bin")
@@ -52,11 +52,11 @@ if not os.path.exists(train_bin_path):
     with open(valid_input_path, "r") as f:
         valid_text = f.read()
     valid_token_ids = myTokenizer.encode(valid_text)
-    print(f"step 3: encoding done, {len(train_token_ids)} train tokens | {len(train_token_ids)} valid tokens")
+    print(f"step 3: encoding done, {len(train_token_ids)} train tokens | {len(valid_token_ids)} valid tokens")
     train_token_array = np.array(train_token_ids, dtype=np.int32)
     train_token_array.tofile(train_bin_path)
     valid_token_array = np.array(valid_token_ids, dtype=np.int32)
-    train_token_array.tofile(valid_bin_path)
+    valid_token_array.tofile(valid_bin_path)
     print(f"step 4: saved to {train_bin_path} {valid_bin_path}")
 else:
     print("token file already exists, loading vocab...")
@@ -204,9 +204,9 @@ def decode(
 print("step 4: starting training loop...")
 train(
     model, optimizer,
-    train_path=train_input_path,
-    val_path=valid_input_path,
-    max_steps=1000,
+    train_path=train_bin_path,
+    val_path=valid_bin_path,
+    max_steps=5000,
     log_interval=100,
     eval_interval=50,
     save_interval=100,
