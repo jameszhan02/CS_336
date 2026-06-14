@@ -7,6 +7,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerBase
+import torch.nn.functional as F
 
 
 
@@ -46,7 +47,112 @@ def run_tokenize_prompt_and_output(
                 with labels, with value 1 where the corresponding label token
                 is part of the response and 0 otherwise.
     """
-    raise NotImplementedError
+    if len(prompt_strs) != len(output_strs):
+        raise ValueError(
+            f"prompt_strs and output_strs must have same length, "
+            f"got {len(prompt_strs)} vs {len(output_strs)}"
+        )
+
+    batch_size = len(prompt_strs)
+
+    # empty batch case
+    if batch_size == 0:
+        empty = torch.empty((0, 0), dtype=torch.long)
+        return {
+            "input_ids": empty,
+            "labels": empty,
+            "response_mask": empty,
+        }
+
+    # pad token fallback
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
+
+    # -----------------------------
+    # 1. tokenize + keep raw seq
+    # -----------------------------
+    all_combined_ids = []
+    all_prompt_lens = []
+
+    for prompt, output in zip(prompt_strs, output_strs):
+        prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+        output_ids = tokenizer.encode(output, add_special_tokens=False)
+
+        combined_ids = prompt_ids + output_ids
+
+        all_combined_ids.append(combined_ids)
+        all_prompt_lens.append(len(prompt_ids))
+
+    # -----------------------------
+    # 2. pad (NO shift yet)
+    # -----------------------------
+    max_len = max(len(x) for x in all_combined_ids)
+
+    full = torch.full(
+        (batch_size, max_len),
+        pad_id,
+        dtype=torch.long
+    )
+
+    for i, ids in enumerate(all_combined_ids):
+        full[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
+
+    # -----------------------------
+    # 3. shift 
+    # -----------------------------
+    input_ids = full[:, :-1].contiguous()
+    labels = full[:, 1:].contiguous()
+
+    # -----------------------------
+    # 4. response mask
+    # -----------------------------
+    response_mask = torch.zeros(
+        (batch_size, max_len - 1),
+        dtype=torch.long
+    )
+
+    for i, prompt_len in enumerate(all_prompt_lens):
+        # after shift:
+        # prompt boundary moves by -1
+        start = max(prompt_len - 1, 0)
+
+        # response length = total_len - prompt_len
+        end = start + (len(all_combined_ids[i]) - prompt_len)
+
+        response_mask[i, start:end] = 1
+
+    return {
+        "input_ids": input_ids,
+        "labels": labels,
+        "response_mask": response_mask,
+    }
+
+
+def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
+    """
+    Compute per-token entropy of next-token distribution (over vocab dim).
+
+    Args:
+        logits: (batch_size, sequence_length, vocab_size)
+
+    Returns:
+        entropies: (batch_size, sequence_length)
+    """
+    # if logits.ndim != 3:
+    #     raise ValueError(f"logits must have shape (B, T, V), got {tuple(logits.shape)}")
+    if logits.ndim < 1:
+        raise ValueError(f"logits must have at least 1 dim, got {tuple(logits.shape)}")
+
+    # log_probs = logits - logsumexp(logits)
+    # for nomalizetion, so when exp value wont overflow
+    log_z = torch.logsumexp(logits, dim=-1, keepdim=True)   # (B, T, 1)
+    log_probs = logits - log_z                              # (B, T, V)
+    probs = torch.exp(log_probs)                            # (B, T, V)
+
+    # H(p) = - sum_v p(v) * log p(v)
+    entropy = -(probs * log_probs).sum(dim=-1)              # (B, T)
+    return entropy
 
 
 def run_get_response_log_probs(
@@ -82,7 +188,31 @@ def run_get_response_log_probs(
                 entropy for each position (present only if
                 return_token_entropy=True).
     """
-    raise NotImplementedError
+    if input_ids.ndim != 2 or labels.ndim != 2:
+        raise ValueError(
+            f"input_ids and labels must be (B, T). Got {tuple(input_ids.shape)} and {tuple(labels.shape)}"
+        )
+    if input_ids.shape != labels.shape:
+        raise ValueError(
+            f"input_ids and labels must have same shape. Got {tuple(input_ids.shape)} vs {tuple(labels.shape)}"
+        )
+
+    # forward
+    logits = model(input_ids=input_ids).logits  # (B, T, V) || Just one single time forward
+
+    # stable log-probs over vocab
+    log_probs_vocab = F.log_softmax(logits, dim=-1)  # (B, T, V)
+
+    # get log_probs for that monent for right label. |ANSWERS Likelyhood|
+    gathered = torch.gather(log_probs_vocab, dim=-1, index=labels.unsqueeze(-1))  # (B, T, 1) | 
+    token_log_probs = gathered.squeeze(-1)  # (B, T)
+
+    out: Dict[str, torch.Tensor] = {"log_probs": token_log_probs}
+
+    if return_token_entropy:
+        out["token_entropy"] = compute_entropy(logits)  # (B, T)
+
+    return out
 
 
 def run_compute_rollout_rewards(
