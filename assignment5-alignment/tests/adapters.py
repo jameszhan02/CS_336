@@ -122,6 +122,7 @@ def run_tokenize_prompt_and_output(
 
         response_mask[i, start:end] = 1
 
+    # for each track(answer) we create them as training data 
     return {
         "input_ids": input_ids,
         "labels": labels,
