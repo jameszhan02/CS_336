@@ -10,7 +10,6 @@ from transformers import PreTrainedTokenizerBase
 import torch.nn.functional as F
 
 
-
 def run_tokenize_prompt_and_output(
     prompt_strs: list[str],
     output_strs: list[str],
@@ -435,7 +434,12 @@ def run_aggregate_loss_across_microbatch(
             A scalar containing the average loss. Make sure you can later call
             backward on this loss.
     """
-    raise NotImplementedError
+    if(loss_normalization == "constant"):
+        raise NotImplementedError
+    pre_token_with_mask = per_token_policy_gradient_loss * mask
+    batch_loss = torch.sum(pre_token_with_mask, dim=-1) / torch.sum(mask, dim=-1)
+    loss = torch.mean(batch_loss, dim=-1) 
+    return loss
 
 
 def run_grpo_train_step(
