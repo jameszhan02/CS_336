@@ -31,6 +31,36 @@ An SFT training step is **structurally identical to pretraining**:
 
 ## Part 2 — RL (GRPO): reward → loss → backward, with numbers
 
+### Step 0: What is `log π`, and why log? (primer)
+
+**π = the policy = the model viewed as a probability distribution.** `π_θ` = policy with params θ. At each position the model sees the prefix (state `s`) and outputs a distribution over the vocab; `π(token | prefix)` = the probability it assigns to that one token (action `a`). It comes straight from softmax over the logits.
+
+**`log π` = log of that probability.** One number per token. Example (Step 6, pos 3): model gave `p("5") = 0.25` → `log π = log(0.25) = −1.386`.
+- Always ≤ 0 (prob ≤ 1). Confident (p→1) → `log π → 0`. Unsure (p→0) → very negative.
+- Read it as: *how confident the model was it would emit this exact token.*
+- Function of **θ** (carries gradient). The advantage does not.
+
+**Where the `(batch, seq_len)` tensor comes from:**
+`model forward → logits (b, seq, vocab) → log_softmax over vocab → gather the entry for the ACTUAL token at each position → log π (b, seq)`. Keep only the real token's log-prob, not all vocab.
+
+**Whole-sequence:** `π(response) = ∏ₜ π(tokₜ)` ⇒ `log π(response) = Σₜ log π(tokₜ)`. Product → sum.
+
+#### Why work in log at all? Core reason: **log turns multiplication into addition.**
+A response is many tokens, so its probability is a *product* of per-token probs. Multiplying many probabilities is miserable:
+
+1. **Underflow.** Each prob < 1, so the product vanishes. `0.5¹⁰ ≈ 0.001`; `0.5¹⁰⁰ ≈ 8×10⁻³¹` → floats round to 0 → `log(0) = −∞` → training dies. In log-space: `100·log(0.5) = −69.3`, perfectly ordinary. **No underflow ever.**
+2. **Gradients.** Product-rule over 100 factors entangles every token with every other. `log` makes it a sum ⇒ `∇log π(resp) = Σₜ ∇log π(tokₜ)`, each token's gradient **independent**, then added. (This is exactly the per-token-summed loss of Step 6 — it only looks clean because of log.)
+3. **Free to do.** `log` is monotonic: bigger `π` ⟺ bigger `log π`. Maximizing log-prob *is* maximizing prob — same optimum, zero downside.
+
+| raw `π` | `log π` |
+|---------|---------|
+| product of many terms | sum of many terms |
+| underflows → `−inf` | stable numbers |
+| entangled product-rule gradients | independent additive gradients |
+| — | same optimum (log monotonic) |
+
+That's why the function receives `policy_log_probs` already in log-space.
+
 ### Step 1: Rollout + reward
 Prompt: `"What is 2+3?"`, sample a group of G = 4 responses:
 

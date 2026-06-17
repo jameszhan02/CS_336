@@ -331,6 +331,14 @@ def run_compute_policy_gradient_loss(
                 Statistics from the underlying loss call, such as
                 clip-fraction components.
     """
+    # this function is intend to convert reward into "loss" in order to do backward
+    # raw_rewards_or_advantages -> a batch_size list tell you reward for each element
+    # policy_log_probs -> for each token the pi_theta(token) log_prob that the current token appear chance
+    # importance_reweighting_method how we adjust grad base on the 'new' model during training.
+    # old_log_probs -> the log_probs is what status
+    # cliprange ｜ params for "grpo" | "gspo".
+    # response_mask where is the response locate
+
     raise NotImplementedError
 
 
