@@ -245,7 +245,22 @@ def run_compute_rollout_rewards(
                 Reward statistics to log. At minimum, include the mean total
                 and format rewards over the rollout batch.
     """
-    raise NotImplementedError
+    rewards = []
+    format_rewards = []
+
+    for response, ground_truth in zip(rollout_responses, repeated_ground_truths):
+        result = reward_fn(response, ground_truth)
+        rewards.append(result["reward"])
+        format_rewards.append(result["format_reward"])
+    
+    raw_rewards = torch.tensor(rewards)
+    
+    metadata = {
+        "mean_reward": raw_rewards.mean().item(),
+        "mean_format_reward": sum(format_rewards) / len(format_rewards),
+    }
+    
+    return raw_rewards, metadata
 
 
 def run_compute_group_normalized_rewards(
@@ -284,7 +299,30 @@ def run_compute_group_normalized_rewards(
                 your choice of other statistics to log (e.g. mean, std, max/min
                 of rewards).
     """
-    raise NotImplementedError
+    # reshape (n_prompts, group_size)
+    n_prompts = len(raw_rewards) // group_size
+    rewards = raw_rewards.reshape(n_prompts, group_size)
+
+    if baseline == "mean":
+        group_mean = rewards.mean(dim=1, keepdim=True)
+        advantages = rewards - group_mean
+    else:
+        raise NotImplementedError(f"baseline={baseline} not supported")
+
+    if advantage_normalizer == "std":
+        group_std = rewards.std(dim=1, keepdim=True)
+        ## this is convert what ever data distribution into mean 0 std 1.
+        advantages = advantages / (group_std + advantage_eps)
+    else:
+        raise NotImplementedError(f"advantage_normalizer={advantage_normalizer} not supported")
+    metadata = {
+        "mean_reward": raw_rewards.mean().item(),
+        "std_reward":  raw_rewards.std().item(),
+        "max_reward":  raw_rewards.max().item(),
+        "min_reward":  raw_rewards.min().item(),
+    }
+
+    return advantages.flatten(), metadata
 
 
 def run_compute_policy_gradient_loss(
@@ -339,6 +377,32 @@ def run_compute_policy_gradient_loss(
     # cliprange ｜ params for "grpo" | "gspo".
     # response_mask where is the response locate
 
+    # make sure |raw_rewards_or_advantages| is the right shape
+    advantages = raw_rewards_or_advantages.reshape(-1, 1)
+    if importance_reweighting_method == "none":
+        per_token_loss = -(advantages * policy_log_probs)
+        return per_token_loss, {}
+    elif importance_reweighting_method == "noclip":
+        ratio = torch.exp(policy_log_probs - old_log_probs)
+        per_token_loss = -(advantages * ratio)
+        return per_token_loss, {} 
+    elif importance_reweighting_method == "grpo":
+        ratio = torch.exp(policy_log_probs - old_log_probs)
+        grpo_ratio = torch.clamp(ratio, 1 - cliprange, 1 + cliprange)
+        unclip_loss = -(advantages * ratio)
+        clip_loss = -(advantages * grpo_ratio)
+        per_token_loss = torch.maximum(unclip_loss, clip_loss)
+        return per_token_loss
+    elif importance_reweighting_method == "gspo":
+        seq_log_ratio = torch.sum((policy_log_probs - old_log_probs) * response_mask, dim=-1) / torch.sum(response_mask, dim=-1)
+        ratio = torch.exp(seq_log_ratio).reshape(-1, 1)
+        gspo_ratio = torch.clamp(ratio, 1 - cliprange, 1 + cliprange)
+        unclip_loss = -(advantages * ratio)
+        clip_loss = -(advantages * gspo_ratio)
+        per_token_loss = torch.maximum(unclip_loss, clip_loss)
+        # expand back to the correct shape with [batch_size, seq]
+        per_token_loss = per_token_loss.expand(-1, policy_log_probs.shape[-1])  # (2, 4)
+        return per_token_loss
     raise NotImplementedError
 
 
