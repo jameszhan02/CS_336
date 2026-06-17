@@ -391,7 +391,7 @@ def run_compute_policy_gradient_loss(
         unclip_loss = -(advantages * ratio)
         clip_loss = -(advantages * grpo_ratio)
         per_token_loss = torch.maximum(unclip_loss, clip_loss)
-        return per_token_loss
+        return per_token_loss, {} 
     elif importance_reweighting_method == "gspo":
         seq_log_ratio = torch.sum((policy_log_probs - old_log_probs) * response_mask, dim=-1) / torch.sum(response_mask, dim=-1)
         ratio = torch.exp(seq_log_ratio).reshape(-1, 1)
@@ -401,7 +401,7 @@ def run_compute_policy_gradient_loss(
         per_token_loss = torch.maximum(unclip_loss, clip_loss)
         # expand back to the correct shape with [batch_size, seq]
         per_token_loss = per_token_loss.expand(-1, policy_log_probs.shape[-1])  # (2, 4)
-        return per_token_loss
+        return per_token_loss, {} 
     raise NotImplementedError
 
 
@@ -528,7 +528,93 @@ def run_grpo_train_step(
                 Dict with metadata from the underlying loss call, gradient norm
                 before clipping, and any other statistics you might want to log.
     """
-    raise NotImplementedError
+    
+    # ---- 1. reward ----
+    raw_rewards, reward_metadata = run_compute_rollout_rewards(
+        reward_fn, rollout_responses, repeated_ground_truths
+    )
+
+    # ---- 2. advantage ----
+    advantages, adv_metadata = run_compute_group_normalized_rewards(
+        raw_rewards, group_size, baseline, advantage_eps, advantage_normalizer
+    )
+
+    # ---- 3. tokenize ----
+    tokenized = run_tokenize_prompt_and_output(
+        repeated_prompts, rollout_responses, tokenizer
+    )
+    input_ids = tokenized["input_ids"]
+    labels = tokenized["labels"]
+    response_mask = tokenized["response_mask"]
+
+    rollout_batch_size = input_ids.shape[0]
+    microbatch_size = rollout_batch_size // gradient_accumulation_steps
+
+    total_loss = 0.0
+    last_pg_metadata = {}
+
+    optimizer.zero_grad()
+
+    for i in range(gradient_accumulation_steps):
+        start = i * microbatch_size
+        end = start + microbatch_size
+
+        micro_input_ids = input_ids[start:end]
+        micro_labels = labels[start:end]
+        micro_response_mask = response_mask[start:end]
+        micro_advantages = advantages[start:end]
+        micro_old_log_probs = (
+            old_log_probs[start:end] if old_log_probs is not None else None
+        )
+
+        # ---- 4. forward: get current log_probs ----
+        log_probs_out = run_get_response_log_probs(
+            model, micro_input_ids, micro_labels, return_token_entropy=False
+        )
+        policy_log_probs = log_probs_out["log_probs"]
+
+        # ---- 5. per-token loss ----
+        per_token_loss, pg_metadata = run_compute_policy_gradient_loss(
+            raw_rewards_or_advantages=micro_advantages,
+            policy_log_probs=policy_log_probs,
+            importance_reweighting_method=importance_reweighting_method,
+            old_log_probs=micro_old_log_probs,
+            cliprange=cliprange,
+            response_mask=micro_response_mask,
+        )
+
+        # ---- 6. into scale loss ----
+        loss = run_aggregate_loss_across_microbatch(
+            per_token_loss, micro_response_mask, loss_normalization, normalization_constant
+        )
+
+        # ---- 7. mean the loss + back ward ----
+        scaled_loss = loss / gradient_accumulation_steps
+        scaled_loss.backward()
+
+        total_loss += loss.item()
+        last_pg_metadata = pg_metadata
+
+    # ---- 8. grad clipping ----
+    grad_norm_before_clip = None
+    if max_grad_norm is not None:
+        grad_norm_before_clip = torch.nn.utils.clip_grad_norm_(
+            model.parameters(), max_grad_norm
+        )
+
+    # ---- 9. update ----
+    optimizer.step()
+    optimizer.zero_grad()  
+    avg_loss = total_loss / gradient_accumulation_steps
+
+    metadata = {
+        **reward_metadata,
+        **adv_metadata,
+        **last_pg_metadata,
+        "grad_norm_before_clip": grad_norm_before_clip,
+    }
+
+    return torch.tensor(avg_loss), metadata
 
 
 """
