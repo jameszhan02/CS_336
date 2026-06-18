@@ -38,7 +38,7 @@ class VLLMServer:
     logging_level: str = "ERROR"
     gpu_memory_utilization: float = 0.9
     launch_server: bool = True
-    startup_timeout: int = 600
+    startup_timeout: int = 60000
     shutdown_timeout: int = 30
 
     def __post_init__(self) -> None:

@@ -20,7 +20,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # 假设你的 vllm_helpers.py 和 adapters.py (含 run_grpo_train_step 等) 都在同一目录
-from vllm_helpers import VLLMServer
+from cs336_alignment.vllm_utils import VLLMServer
 from adapters import run_grpo_train_step  # 你之前实现的训练函数
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 
@@ -53,9 +53,9 @@ MAX_GRAD_NORM = 1.0
 # 训练阶段vLLM是关闭的，所以这个值在"采样阶段"可以设高一点
 VLLM_GPU_MEMORY_UTILIZATION = 0.5
 
-# r1_zero prompt 模板路径（跟你之前eval脚本里用的一致）
-R1_ZERO_PROMPT_PATH = "prompts/r1_zero.prompt"
-GSM8K_TRAIN_PATH = "../data/gsm8k/train.jsonl"
+# prompt 模板路径：用 three-shot 版本（带示例），不是 zero-shot 的 r1_zero.prompt
+THREE_SHOT_PROMPT_PATH = "cs336_alignment/prompts/r1_zero_three_shot_gsm8k.prompt"
+GSM8K_TRAIN_PATH = "data/gsm8k/train.jsonl"
 
 
 def reward_fn(response: str, ground_truth: str) -> dict:
@@ -86,7 +86,7 @@ def free_gpu_memory():
 def main():
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-    with open(R1_ZERO_PROMPT_PATH) as f:
+    with open(THREE_SHOT_PROMPT_PATH) as f:
         prompt_template = f.read()
 
     # 按 handout 要求，只用前 N_TRAIN_EXAMPLES 条作为训练池

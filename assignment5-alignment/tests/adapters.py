@@ -568,6 +568,8 @@ def run_grpo_train_step(
         )
 
         # ---- 4. forward: get current log_probs ----
+        micro_input_ids = micro_input_ids.to(next(model.parameters()).device)
+        micro_labels = micro_labels.to(next(model.parameters()).device)
         log_probs_out = run_get_response_log_probs(
             model, micro_input_ids, micro_labels, return_token_entropy=False
         )
