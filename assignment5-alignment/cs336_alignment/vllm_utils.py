@@ -18,11 +18,13 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+# @ dataclass is a notation that provide a default behavior of the class
+# default constructor | print (sort of .tostring) | compare behavior
 @dataclass
 class VLLMCompletion:
     text: str
     token_ids: list[int]
-    finish_reason: str | None
+    finish_reason: str | None # hit the stop token or hit the # of max tokens
 
 
 @dataclass
