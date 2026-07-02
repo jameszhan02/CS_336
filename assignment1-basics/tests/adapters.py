@@ -885,6 +885,7 @@ def get_tokenizer(
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
     return Tokenizer(vocab, merges, special_tokens)
+
 ##  ================================= Start of calss tokenizer ================================= 
 class Tokenizer:
     def __init__(self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens=None):
@@ -892,7 +893,7 @@ class Tokenizer:
         self.merges = merges
         self.special_tokens = special_tokens or []
         
-        self.bytes_to_id = {v: k for k, v in vocab.items()}
+        self.bytes_to_id = {v: k for k, v in vocab.items()} # reverse vocab | pari to id look up
         
         for tok in self.special_tokens:
             tok_bytes = tok.encode("utf-8")
@@ -916,33 +917,27 @@ class Tokenizer:
                 a, b = line.strip().split()
                 merges.append((a.encode("latin-1"), b.encode("latin-1")))
         
-        return cls(vocab, merges, special_tokens)
+        return cls(vocab, merges, special_tokens) # cls represent cuurent class Tokenizer itself
 
     def encode(self, text: str) -> list[int]:
         GPT_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-        
         ids = []
-        
         if self.special_tokens:
-            sorted_special = sorted(self.special_tokens, key=len, reverse=True)
+            sorted_special = sorted(self.special_tokens, key=len, reverse=True) ## greedy longest-match
             special_pat = "|".join(re.escape(tok) for tok in sorted_special)
-            chunks = re.split(f"({special_pat})", text)  
+            chunks = re.split(f"({special_pat})", text)   # if special_pat sround by () bracket it means the split symbol will be keeped.
         else:
             chunks = [text]
-        
         for chunk in chunks:
             if not chunk:
                 continue
-            
             if chunk in self.special_tokens:
                 ids.append(self.bytes_to_id[chunk.encode("utf-8")])
                 continue
-            
-            words = re.findall(GPT_PAT, chunk)
+            words = re.findall(GPT_PAT, chunk) # 
             for word in words:
                 tokens = [bytes([b]) for b in word.encode("utf-8")]
-                
-                while len(tokens) > 1:
+                while len(tokens) > 1: # if only 1 token left in current word or best rank remain 'inf'
                     best_rank = float("inf")
                     best_i = None
                     for i in range(len(tokens) - 1):
@@ -950,23 +945,19 @@ class Tokenizer:
                         if rank < best_rank:
                             best_rank = rank
                             best_i = i
-                    
                     if best_i is None or best_rank == float("inf"):
                         break
-                    
                     tokens = tokens[:best_i] + [tokens[best_i] + tokens[best_i+1]] + tokens[best_i+2:]
-                
-                ids.extend(self.bytes_to_id[tok] for tok in tokens)
-        
+                ids.extend(self.bytes_to_id[tok] for tok in tokens) # extend vs append , extend able to add a list of items into the array instead of one.
         return ids
 
-    def encode_iterable(self, iterable):
+    def encode_iterable(self, iterable): # encode 
         for text in iterable:
             ids = self.encode(text)
-            yield from ids
+            yield from ids # yield so function wont be called immdiately fire one loop after a loop called
 
     def decode(self, ids: list[int]) -> str:
-        return b"".join(self.vocab[i] for i in ids).decode("utf-8", errors="replace")
+        return b"".join(self.vocab[i] for i in ids).decode("utf-8", errors="replace") # simplely return the id mapping.
 # =================================  END of tokenizer class ================================= 
 
 def run_train_bpe(
@@ -1010,18 +1001,19 @@ def run_train_bpe(
         chunks = [text]  # if special token is empty
 
     #all the 'word' lvl thing that appear in the dataset we gived.
-    words = [] 
+    words = []  # after gpt regx data break into 'word' lvl
     for chunk in chunks:
         words += re.findall(GPT_PAT, chunk)
     
-    word_freqs = defaultdict(int)
+    word_freqs = defaultdict(int) # dict that wont stop you to handle a key that not yet exist
     for word in words:
         key = tuple(bytes([b]) for b in word.encode("utf-8"))
-        word_freqs[key] += 1
+        word_freqs[key] += 1 # word_freqs is word in bytes as key + freq
 
 
     ## END of pre-tokenizer 
     t1 = time.perf_counter()
+    print(f"pre-tokenizer  total time spent: {t1 - t0:.4f} seconds")
     # inital vocab
     vocab = {}
     idx = 0
@@ -1047,7 +1039,7 @@ def run_train_bpe(
         if not pair_freqs:
             break
 
-        best_pair = max(pair_freqs, key=lambda p: (pair_freqs[p], p))
+        best_pair = max(pair_freqs, key=lambda p: (pair_freqs[p], p)) # by python default when you loop throught a dict you loop the key not value.
         merged = best_pair[0] + best_pair[1]
 
         new_word_freqs = defaultdict(int)
@@ -1056,14 +1048,15 @@ def run_train_bpe(
             i = 0
             while i < len(word):
                 if i < len(word) - 1 and word[i] == best_pair[0] and word[i+1] == best_pair[1]:
-                    if i > 0:
+                    if i > 0: # if is already some char in this word
                         pair_freqs[(new_word[-1], word[i])]      -= freq
                         pair_freqs[(new_word[-1], merged)]        += freq
-                    if i + 2 < len(word):
+                    if i + 2 < len(word): # if was one token come after the merge
                         pair_freqs[(word[i+1], word[i+2])]       -= freq
                         pair_freqs[(merged,     word[i+2])]       += freq
-                    pair_freqs[best_pair] -= freq
+                    pair_freqs[best_pair] -= freq # remove merged pair
 
+                    # merge new tokens to the word_freqs
                     new_word.append(merged)
                     i += 2
                 else:
@@ -1077,4 +1070,4 @@ def run_train_bpe(
         idx += 1
 
     t2 = time.perf_counter()
-    return vocab, merges
+    return vocab, merges # merges is more like the rule that need to be follow during the new encoding happen so we know the "right order" how to do the
