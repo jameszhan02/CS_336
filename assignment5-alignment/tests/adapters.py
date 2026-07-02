@@ -379,6 +379,7 @@ def run_compute_policy_gradient_loss(
     # make sure |raw_rewards_or_advantages| is the right shape
     advantages = raw_rewards_or_advantages.reshape(-1, 1)
     if importance_reweighting_method == "none":
+        advantages = advantages.to(policy_log_probs.device)
         per_token_loss = -(advantages * policy_log_probs)
         return per_token_loss, {}
     elif importance_reweighting_method == "noclip":
@@ -436,6 +437,7 @@ def run_aggregate_loss_across_microbatch(
     """
     if(loss_normalization == "constant"):
         raise NotImplementedError
+    mask = mask.to(per_token_policy_gradient_loss.device)
     pre_token_with_mask = per_token_policy_gradient_loss * mask
     batch_loss = torch.sum(pre_token_with_mask, dim=-1) / torch.sum(mask, dim=-1)
     loss = torch.mean(batch_loss, dim=-1) 

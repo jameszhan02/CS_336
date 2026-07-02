@@ -10,6 +10,16 @@
       1. 把当前policy存成HF checkpoint
       2. 启动vLLM，加载这个checkpoint，生成rollout，关闭vLLM
       3. 用这些rollout跑 run_grpo_train_step (PyTorch backward)
+
+=== OOM修复说明 ===
+1. AdamW -> bitsandbytes.optim.PagedAdamW8bit：exp_avg/exp_avg_sq从bf16
+   压到int8，地基显存从~8GB降到~5GB
+2. move_optimizer_state()：model.to(device)不会搬optimizer.state里的
+   exp_avg/exp_avg_sq（它们不是model的parameter/buffer），漏掉这步是
+   "model挪CPU给vLLM腾显存"时最容易踩的坑
+3. gradient_checkpointing_enable()：用重计算换activation显存
+
+运行前: pip install bitsandbytes --break-system-packages
 """
 
 import gc
@@ -17,9 +27,9 @@ import json
 import os
 import random
 import torch
+import bitsandbytes as bnb
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# 假设你的 vllm_helpers.py 和 adapters.py (含 run_grpo_train_step 等) 都在同一目录
 from cs336_alignment.vllm_utils import VLLMServer
 from adapters import run_grpo_train_step  # 你之前实现的训练函数
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
@@ -34,23 +44,24 @@ DEVICE = "cuda:0"
 N_TRAIN_EXAMPLES = 6400
 N_VAL_EXAMPLES = 1024
 
-NUM_ROLLOUT_STEPS = 200
+NUM_ROLLOUT_STEPS = 5
 LEARNING_RATE = 1e-5
 
-ROLLOUT_BATCH_SIZE = 256
+ROLLOUT_BATCH_SIZE = 32
 TRAIN_BATCH_SIZE = 256
-GROUP_SIZE = 8
+GROUP_SIZE = 4
 N_PROMPTS_PER_ROLLOUT_BATCH = ROLLOUT_BATCH_SIZE // GROUP_SIZE  # 32
 
-GRADIENT_ACCUMULATION_STEPS = 32
+GRADIENT_ACCUMULATION_STEPS = 4
 MICROBATCH_SIZE = TRAIN_BATCH_SIZE // GRADIENT_ACCUMULATION_STEPS  # 8，对8GB显存友好
 
 SAMPLING_TEMPERATURE = 1.0
-SAMPLING_MAX_TOKENS = 512
+SAMPLING_MAX_TOKENS = 32
 MAX_GRAD_NORM = 1.0
 
 # vLLM 显存配置：8GB卡，必须给训练模型留够空间
 # 训练阶段vLLM是关闭的，所以这个值在"采样阶段"可以设高一点
+# 注：optimizer state也搬到CPU之后，这里其实可以适当调高(比如0.6~0.7)
 VLLM_GPU_MEMORY_UTILIZATION = 0.5
 
 # prompt 模板路径：用 three-shot 版本（带示例），不是 zero-shot 的 r1_zero.prompt
@@ -68,7 +79,7 @@ def reward_fn(response: str, ground_truth: str) -> dict:
 
 
 def load_prompts_and_ground_truths(n_prompts: int, prompt_template: str, examples_pool: list[dict]) -> tuple[list[str], list[str]]:
-    """从给定的GSM8K样本池里随机采样 n_prompts 条，套上 r1_zero 模板。"""
+    """从给定的GSM8K样本池里随机采样 n_prompts 条，套上 three-shot 模板。"""
     sampled = random.sample(examples_pool, n_prompts)
 
     prompts = [prompt_template.format(question=ex["question"]) for ex in sampled]
@@ -81,6 +92,19 @@ def free_gpu_memory():
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
+
+
+def move_optimizer_state(optimizer: torch.optim.Optimizer, device: str):
+    """把optimizer.state里的tensor(exp_avg/exp_avg_sq等)搬到指定device。
+
+    model.to(device) 不会动这些tensor——它们存在optimizer.state这个
+    独立的dict里，不是model的parameter/buffer，traversal覆盖不到。
+    这是单卡场景下"model挪CPU给vLLM腾显存"必须配套做的一步。
+    """
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if torch.is_tensor(v):
+                state[k] = v.to(device)
 
 
 def main():
@@ -103,10 +127,13 @@ def main():
         MODEL_ID,
         torch_dtype=torch.bfloat16,  # 8GB显存上，bf16比fp32省一半显存
     ).to(DEVICE)
+    model.gradient_checkpointing_enable()  # 用计算换activation显存，几乎免费
     model.train()
 
     # handout 指定的 optimizer 配置：betas=(0.9, 0.95), weight_decay=0.0
-    optimizer = torch.optim.AdamW(
+    # 改用8bit Adam：在8GB卡上这是单项收益最大的改动。PagedAdamW8bit
+    # 遇到真不够时还会自动往CPU溢出，相当于多一层保险。
+    optimizer = bnb.optim.PagedAdamW8bit(
         model.parameters(),
         lr=LEARNING_RATE,
         betas=(0.9, 0.95),
@@ -123,8 +150,9 @@ def main():
         model.save_pretrained(ckpt_path)
         tokenizer.save_pretrained(ckpt_path)
 
-        # 训练模型暂时挪到CPU，给vLLM腾显存（8GB卡上几乎必须做这一步）
+        # 训练模型 + optimizer state 都挪到CPU，给vLLM腾显存
         model.to("cpu")
+        move_optimizer_state(optimizer, "cpu")
         free_gpu_memory()
 
         prompts, ground_truths = load_prompts_and_ground_truths(
@@ -157,9 +185,10 @@ def main():
         free_gpu_memory()
 
         # ---------------------------------------------------------
-        # 阶段2：把训练模型挪回GPU，跑GRPO训练
+        # 阶段2：把训练模型 + optimizer state 都挪回GPU，跑GRPO训练
         # ---------------------------------------------------------
         model.to(DEVICE)
+        move_optimizer_state(optimizer, DEVICE)
         model.train()
 
         loss, metadata = run_grpo_train_step(

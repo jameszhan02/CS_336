@@ -10,6 +10,21 @@
       1. 把当前policy存成HF checkpoint
       2. 启动vLLM，加载这个checkpoint，生成rollout，关闭vLLM
       3. 用这些rollout跑 run_grpo_train_step (PyTorch backward)
+
+=== OOM修复说明 (相对上一版的3处改动) ===
+1. AdamW -> bitsandbytes.optim.PagedAdamW8bit
+   普通AdamW在bf16下，exp_avg+exp_avg_sq两个state各占~2GB，
+   加上参数+梯度，光"地基"就吃满8GB，根本没给activation/vLLM留空间。
+   8bit state把这部分压缩到~0.5GB×2，腾出大约3GB。
+2. 新增 move_optimizer_state()，并在model.to("cpu")/to(DEVICE)前后都调用它
+   model.to(device) 只搬模型的parameter/buffer，不会动optimizer.state里的
+   exp_avg/exp_avg_sq——这些tensor是独立存在optimizer.state这个dict里的。
+   之前代码里"model挪到CPU给vLLM腾显存"那步，这部分根本没挪，
+   vLLM起来的时候GPU上还卡着这两块，这是导致OOM最直接的原因。
+3. 开启 gradient_checkpointing
+   用少量重计算换activation显存，8GB卡上基本是免费的优化。
+
+运行前需要: pip install bitsandbytes --break-system-packages
 """
 
 import gc
@@ -17,6 +32,7 @@ import json
 import os
 import random
 import torch
+import bitsandbytes as bnb
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # 假设你的 vllm_helpers.py 和 adapters.py (含 run_grpo_train_step 等) 都在同一目录
@@ -51,6 +67,7 @@ MAX_GRAD_NORM = 1.0
 
 # vLLM 显存配置：8GB卡，必须给训练模型留够空间
 # 训练阶段vLLM是关闭的，所以这个值在"采样阶段"可以设高一点
+# 注：optimizer state也搬到CPU之后，这里其实可以适当调高(比如0.6~0.7)
 VLLM_GPU_MEMORY_UTILIZATION = 0.5
 
 # r1_zero prompt 模板路径（跟你之前eval脚本里用的一致）
@@ -83,6 +100,20 @@ def free_gpu_memory():
     torch.cuda.synchronize()
 
 
+def move_optimizer_state(optimizer: torch.optim.Optimizer, device: str):
+    """把optimizer.state里的tensor(exp_avg/exp_avg_sq等)搬到指定device。
+
+    model.to(device) 不会动这些tensor——它们存在optimizer.state这个
+    独立的dict里，不是model的parameter/buffer，traversal覆盖不到。
+    这是单卡场景下"model挪CPU给vLLM腾显存"必须配套做的一步，
+    漏掉这一步，GPU上的optimizer state会一直占着，是最容易被忽略的OOM来源。
+    """
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if torch.is_tensor(v):
+                state[k] = v.to(device)
+
+
 def main():
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
@@ -103,10 +134,14 @@ def main():
         MODEL_ID,
         torch_dtype=torch.bfloat16,  # 8GB显存上，bf16比fp32省一半显存
     ).to(DEVICE)
+    model.gradient_checkpointing_enable()  # 用计算换activation显存，几乎免费
     model.train()
 
     # handout 指定的 optimizer 配置：betas=(0.9, 0.95), weight_decay=0.0
-    optimizer = torch.optim.AdamW(
+    # 改用8bit Adam：exp_avg/exp_avg_sq从bf16(各~2GB)压到int8(各~0.5GB)，
+    # 在8GB卡上这是单项收益最大的改动。PagedAdamW8bit遇到真不够时
+    # 还会自动往CPU溢出，相当于多一层保险。
+    optimizer = bnb.optim.PagedAdamW8bit(
         model.parameters(),
         lr=LEARNING_RATE,
         betas=(0.9, 0.95),
@@ -123,8 +158,10 @@ def main():
         model.save_pretrained(ckpt_path)
         tokenizer.save_pretrained(ckpt_path)
 
-        # 训练模型暂时挪到CPU，给vLLM腾显存（8GB卡上几乎必须做这一步）
+        # 训练模型 + optimizer state 都挪到CPU，给vLLM腾显存
+        # （只挪model不挪optimizer state，是上一版OOM的直接原因）
         model.to("cpu")
+        move_optimizer_state(optimizer, "cpu")
         free_gpu_memory()
 
         prompts, ground_truths = load_prompts_and_ground_truths(
@@ -157,9 +194,10 @@ def main():
         free_gpu_memory()
 
         # ---------------------------------------------------------
-        # 阶段2：把训练模型挪回GPU，跑GRPO训练
+        # 阶段2：把训练模型 + optimizer state 都挪回GPU，跑GRPO训练
         # ---------------------------------------------------------
         model.to(DEVICE)
+        move_optimizer_state(optimizer, DEVICE)
         model.train()
 
         loss, metadata = run_grpo_train_step(

@@ -1001,14 +1001,16 @@ def run_train_bpe(
     # read file form the inputpath
     with open(input_path, "r", encoding="utf-8") as f:
         text = f.read()
-        # read file form the inputpath
     if special_tokens: 
+        # assemble special token into rgx style 
         special_pat = "|".join(re.escape(tok) for tok in special_tokens) # escape to make sure | -> \| so when split apply to this will know is plain text
+        # split chunks with special_tokens into chunk
         chunks = re.split(special_pat, text)
     else:
         chunks = [text]  # if special token is empty
 
-    words = []
+    #all the 'word' lvl thing that appear in the dataset we gived.
+    words = [] 
     for chunk in chunks:
         words += re.findall(GPT_PAT, chunk)
     
@@ -1036,37 +1038,6 @@ def run_train_bpe(
     # BPE merge loop
     merges = []
     num_merges = vocab_size - len(vocab) # how many merge we allow in current load
-
-    # for _ in range(num_merges):
-    #     pair_freqs = defaultdict(int)  # in each loop we need a pair_dict to record each pair comb. and freq
-    #     for word, freq in word_freqs.items():  #  ex. word: (h,e,l,l,o) freq: 5
-    #         for i in range(len(word) - 1):
-    #             pair_freqs[(word[i], word[i+1])] += freq
-    #     if not pair_freqs:
-    #         break
-
-    #     # 
-    #     best_pair = max(pair_freqs, key=lambda p: (pair_freqs[p], p)) # max for tuple will compare form left to right 
-
-    #     merged = best_pair[0] + best_pair[1] # bestpair only been return in key string nonlike JS, determined by python for structure
-    #     new_word_freqs = defaultdict(int)
-    #     for word, freq in word_freqs.items():
-    #         new_word = []
-    #         i = 0
-    #         while i < len(word):
-    #             if i < len(word) - 1 and word[i] == best_pair[0] and word[i+1] == best_pair[1]:
-    #                 new_word.append(merged)
-    #                 i += 2
-    #             else:
-    #                 new_word.append(word[i])
-    #                 i += 1
-    #         new_word_freqs[tuple(new_word)] += freq
-    #     word_freqs = new_word_freqs
-
-    #     merges.append(best_pair)
-    #     vocab[idx] = merged
-    #     idx += 1
-
     pair_freqs = defaultdict(int)
     for word, freq in word_freqs.items():
         for i in range(len(word) - 1):
