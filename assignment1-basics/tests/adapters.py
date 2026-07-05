@@ -42,11 +42,11 @@ class Linear(nn.Module):
         super().__init__() 
         
         self.weight = nn.Parameter(
-            torch.empty(out_features, in_features, device=device, dtype=dtype)
+            torch.empty(out_features, in_features, device=device, dtype=dtype) # row vector
         )
         
         std = (2 / (in_features + out_features)) ** 0.5
-        nn.init.trunc_normal_(self.weight, mean=0, std=std, a=-3*std, b=3*std)
+        nn.init.trunc_normal_(self.weight, mean=0, std=std, a=-3*std, b=3*std) # init weight by the hand out
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x @ self.weight.T
@@ -70,7 +70,7 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
     embd = Embedding(vocab_size, d_model)
-    embd.load_state_dict({"weight": weights})
+    embd.load_state_dict({"weight": weights}) # load state dict is inherits from 
     return embd(token_ids)
 
 class Embedding(nn.Module):
@@ -125,6 +125,7 @@ def run_swiglu(
     layer.w2.weight.data = w2_weight
     layer.w3.weight.data = w3_weight
     return layer(in_features)
+
 class SwiGLU(nn.Module):
     def __init__(self, d_model: int, d_ff: int, device=None, dtype=None):
         super().__init__()
@@ -302,13 +303,14 @@ def run_rope(
     return rope(in_query_or_key, token_positions)
 
 class RotaryPositionalEmbedding(nn.Module):
+    # TODO: be more familiar with this smarter iplementation
     def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
         super().__init__()
         
-        dim_indices = torch.arange(0, d_k, 2, device=device, dtype=torch.float32)
-        inv_freq = 1.0 / (theta ** (dim_indices / d_k))
+        dim_indices = torch.arange(0, d_k, 2, device=device, dtype=torch.float32) #   torch.arange(start, end, step) if end = d_k = 8 -> return ([0,2,4,6])
+        inv_freq = 1.0 / (theta ** (dim_indices / d_k)) # angle of eaach seq position
         
-        positions = torch.arange(0, max_seq_len, device=device, dtype=torch.float32)
+        positions = torch.arange(0, max_seq_len, device=device, dtype=torch.float32) # [0, 1, 2, ..., max_seq_len]
         angles = positions.unsqueeze(-1) * inv_freq  # (max_seq_len, d_k//2)
         
         cos = torch.cos(angles)  # (max_seq_len, d_k//2)
@@ -323,7 +325,7 @@ class RotaryPositionalEmbedding(nn.Module):
         
         x_even = x[..., 0::2]
         x_odd  = x[..., 1::2]
-        
+    
         out_even = x_even * cos - x_odd * sin
         out_odd  = x_even * sin + x_odd * cos
         

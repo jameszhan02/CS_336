@@ -1,13 +1,14 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tests')) # so current file could visit other files under ../tests folder
-from adapters import run_train_bpe
+from adapters import run_train_bpe, Tokenizer
 import pickle
 import time
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 print("|BASE URL : ", BASE_DIR , "|")
 
-BPE_TRAIN_FILE_NAME = "TinyStoriesV2-GPT4-valid.txt"
+BPE_TRAIN_FILE_NAME = "owt_valid.txt"
+# BPE_TRAIN_FILE_NAME = "TinyStoriesV2-GPT4-valid.txt"
 train_input_path = os.path.join(BASE_DIR, "data", BPE_TRAIN_FILE_NAME)
 valid_input_path = os.path.join(BASE_DIR, "data", "TinyStoriesV2-GPT4-valid.txt")
 
@@ -16,7 +17,7 @@ valid_input_path = os.path.join(BASE_DIR, "data", "TinyStoriesV2-GPT4-valid.txt"
 
 
 t0 = time.perf_counter()
-vocab_size = 10000
+vocab_size = 32000
 saving_path = BPE_TRAIN_FILE_NAME + "vocab.pkl"
 vocab_path = os.path.join(BASE_DIR, "data", saving_path)
 if not os.path.exists(vocab_path):
@@ -34,7 +35,6 @@ else:
         data = pickle.load(f)
     vocab, merges = data["vocab"], data["merges"]
 
-
 longest_id, longest_token = max(vocab.items(), key=lambda item: len(item[1]))
 
 print("longest token id:", longest_id)
@@ -43,3 +43,23 @@ print("longest token bytes:", longest_token)
 ## END of pre-tokenizer 
 t1 = time.perf_counter()
 print(f"BPE total time spent: {t1 - t0:.4f} seconds") # TODO: python native implementation seems like could not do perfect at this task, this implement save later to complete with "Tiny CC" task.
+
+
+# check out the compression ratio
+with open(valid_input_path, "r", encoding="utf-8") as f:
+        text = f.read()
+        docs = text.split("<|endoftext|>")
+        docs_10 = docs[:10]
+
+my_tokenizer = Tokenizer(vocab, merges, ["<|endoftext|>"])
+total_bytes = 0
+total_tokens = 0
+
+print("first doc sample print: ", docs_10[0])
+
+for doc in docs_10:
+    ids = my_tokenizer.encode(doc)
+    total_bytes += len(doc.encode("utf-8"))
+    total_tokens += len(ids)
+ratio = total_bytes / total_tokens
+print(f"compression ratio: {ratio:.4f} bytes/token")
