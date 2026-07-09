@@ -1,6 +1,6 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tests'))
-from adapters import AdamW, run_get_batch, run_transformer_lm, TransformerLM, run_cross_entropy, run_save_checkpoint, run_train_bpe, Tokenizer
+from adapters import KVCache, AdamW, run_get_batch, run_transformer_lm, TransformerLM, run_cross_entropy, run_save_checkpoint, run_train_bpe, Tokenizer
 import numpy as np
 import torch
 
@@ -174,28 +174,47 @@ def decode(
     """
     model.eval()
     tokens = list(prompt_tokens)  
+    # KV_cache change_5
+    kv_cache = KVCache(model.num_layers)
 
     with torch.no_grad():
-        for _ in range(max_new_tokens):
-            context = tokens[-CONTEXT_LENGTH:]
-            x = torch.tensor(context, dtype=torch.long, device=device).unsqueeze(0)
-            # x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
-
-            logits = model(x)           # (1, sequence_length, vocab_size)
-            logits = logits[0, -1, :]   # (vocab_size,)
-
-            # 3. temperature softmax
+        # prefill: for the first time before the loop, kv_cache yet still None we fill the cache and slice logits as last dim for next token generate.
+        x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
+        logits = model(x, kv_cache=kv_cache)
+        logits = logits[0, -1, :]
+        for _ in range(max_new_tokens): # generate at least till hit the max token limit 
             probs = softmax_with_temperature(logits, temperature)
-
-            # 4. nucleus sampling 
             next_token = nucleus_sampling(probs, p)
-
-            # 5. append
             tokens.append(next_token)
 
-            # 6. ending token condition
             if eos_token_id is not None and next_token == eos_token_id:
                 break
+
+            # decode: over ride x with the next token only into the loop rest information already in the KV cache.
+            x = torch.tensor([[next_token]], dtype=torch.long, device=device)
+            logits = model(x, kv_cache=kv_cache)
+            logits = logits[0, -1, :]
+            
+            # context = tokens[-CONTEXT_LENGTH:] # only fetch as long as the tokens not exceed the context tokens.
+            # x = torch.tensor(context, dtype=torch.long, device=device).unsqueeze(0)
+            # # x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
+
+            # logits = model(x)           # (1, sequence_length, vocab_size)
+            # # only get the last seq_length position logits as the input for next token probs
+            # logits = logits[0, -1, :]   # (vocab_size,)
+
+            # # 3. temperature softmax
+            # probs = softmax_with_temperature(logits, temperature)
+
+            # # 4. nucleus sampling 
+            # next_token = nucleus_sampling(probs, p)
+
+            # # 5. append
+            # tokens.append(next_token)
+
+            # # 6. ending token condition
+            # if eos_token_id is not None and next_token == eos_token_id:
+            #     break
 
     return tokens
 

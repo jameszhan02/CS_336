@@ -221,6 +221,25 @@ def run_multihead_self_attention(
     out = out.transpose(-3, -2).contiguous().view(*batch, seq, d_model)
     return out @ o_proj_weight.T
 
+# KV_cache change_1
+class KVCache:
+    """
+    New KVCache class for iumplement KV cache
+    """
+    def __init__(self, num_layers: int):
+        self.k = [None] * num_layers
+        self.v = [None] * num_layers
+
+    def seq_len(self, layer_idx: int) -> int:
+        return 0 if self.k[layer_idx] is None else self.k[layer_idx].shape[-2]
+
+    def get(self, layer_idx: int):
+        if self.k[layer_idx] is None:
+            return None
+        return (self.k[layer_idx], self.v[layer_idx])
+
+    def set(self, layer_idx: int, kv: tuple[torch.Tensor, torch.Tensor]):
+        self.k[layer_idx], self.v[layer_idx] = kv
 
 def run_multihead_self_attention_with_rope(
     d_model: int,
@@ -233,7 +252,8 @@ def run_multihead_self_attention_with_rope(
     o_proj_weight: Float[Tensor, " d_model d_model"],
     in_features: Float[Tensor, " ... sequence_length d_model"],
     token_positions: Int[Tensor, " ... sequence_length"] | None = None,
-) -> Float[Tensor, " ... sequence_length d_model"]:
+    past_kv: tuple[Tensor, Tensor] | None = None,
+) -> tuple[Float[Tensor, " ... sequence_length d_model"], tuple[Tensor, Tensor]]:
     """
     Given the key, query, and value projection weights of a naive unbatched
     implementation of multi-head attention, return the output of an optimized batched
@@ -266,18 +286,35 @@ def run_multihead_self_attention_with_rope(
     K = in_features @ k_proj_weight.T
     V = in_features @ v_proj_weight.T
 
+    # view func split orginal QKV shape to the num_head + d_k
     Q = Q.view(*batch, seq, num_heads, d_k).transpose(-3, -2)
     K = K.view(*batch, seq, num_heads, d_k).transpose(-3, -2)
     V = V.view(*batch, seq, num_heads, d_k).transpose(-3, -2)
 
-    Q_rope = run_rope(d_k, theta, max_seq_len, Q, torch.arange(0, seq)) 
-    K_rope = run_rope(d_k, theta, max_seq_len, K, torch.arange(0, seq)) 
 
-    # torch.tril control over with giving triangular lower.
-    mask = torch.tril(torch.ones(seq, seq, dtype=torch.bool, device=in_features.device))
-    out = run_scaled_dot_product_attention(Q_rope, K_rope, V, mask=mask)
+    # KV_cache change_2
+    if token_positions is None:
+        token_positions = torch.arange(0, seq, device=in_features.device)
+
+    Q_rope = run_rope(d_k, theta, max_seq_len, Q, token_positions)
+    K_rope = run_rope(d_k, theta, max_seq_len, K, token_positions)
+
+    if past_kv is not None:
+        past_k, past_v = past_kv
+        # cancat in seq_length dim 
+        K_full = torch.cat([past_k, K_rope], dim=-2)
+        V_full = torch.cat([past_v, V], dim=-2)
+    else:
+        K_full, V_full = K_rope, V
+
+    # constructure tril matrix with the token_position + condition
+    total_len = K_full.shape[-2]
+    k_positions = torch.arange(total_len, device=in_features.device)
+    mask = (k_positions.unsqueeze(0) <= token_positions.unsqueeze(-1))  # (seq, total_len)
+
+    out = run_scaled_dot_product_attention(Q_rope, K_full, V_full, mask=mask)
     out = out.transpose(-3, -2).contiguous().view(*batch, seq, d_model)
-    return out @ o_proj_weight.T
+    return out @ o_proj_weight.T, (K_full, V_full)
 
 
 def run_rope(
@@ -426,16 +463,35 @@ class TransformerBlock(nn.Module):
         self.attn.v_proj = Linear(d_model, d_model, device=device, dtype=dtype)
         self.attn.output_proj = Linear(d_model, d_model, device=device, dtype=dtype)
 
-    def forward(self, x):
+    # KV_cache change_3
+    def forward(self, x, kv_cache=None, layer_idx=None):
         x_norm = self.ln1(x)
-        attn_out = run_multihead_self_attention_with_rope(
+        seq = x_norm.shape[-2]
+
+        if kv_cache is not None:
+            past_len = kv_cache.seq_len(layer_idx) # handle the situation not only 1 tokens been added at a time 
+            positions = torch.arange(past_len, past_len + seq, device=x.device)
+            past_kv = kv_cache.get(layer_idx)
+        else:
+            positions = None
+            past_kv = None
+
+        # destructre new FULL KV return and over ride the layer
+        attn_out, new_kv = run_multihead_self_attention_with_rope(
             self.d_model, self.num_heads, self.max_seq_len, self.theta,
             self.attn.q_proj.weight,
             self.attn.k_proj.weight,
             self.attn.v_proj.weight,
             self.attn.output_proj.weight,
-            x_norm
+            x_norm,
+            token_positions=positions,
+            past_kv=past_kv,
         )
+
+        if kv_cache is not None:
+            kv_cache.set(layer_idx, new_kv)
+       
+
         x = x + attn_out
         x = x + self.ffn(self.ln2(x))
         return x
@@ -549,15 +605,17 @@ class TransformerLM(nn.Module):
         
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
 
-    def forward(self, in_indices):
+    # KV_cache change_4
+    def forward(self, in_indices, kv_cache=None):
         x = self.token_embeddings(in_indices)
-        
-        for layer in self.layers:
-            x = layer(x)
+
+        # for layer in self.layers:
+        for i, layer in enumerate(self.layers):
+            x = layer(x, kv_cache=kv_cache, layer_idx=i)
         
         x = self.ln_final(x)
         
-        return self.lm_head(x)
+        return self.lm_head(x) # return in logits
 
 def run_rmsnorm(
     d_model: int,
