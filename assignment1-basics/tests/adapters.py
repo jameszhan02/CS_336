@@ -139,6 +139,9 @@ class SwiGLU(nn.Module):
         hidden = self.w3(x)
         # W2 * (gate ⊙ hidden)
         return self.w2(gate * hidden)
+        # ============ SiLu Only -- for exp ====================
+        # hidden = torch.nn.functional.silu(self.w1(x))
+        # return self.w2(hidden)
 
 def run_scaled_dot_product_attention(
     Q: Float[Tensor, " ... queries d_k"],
@@ -465,7 +468,7 @@ class TransformerBlock(nn.Module):
 
     # KV_cache change_3
     def forward(self, x, kv_cache=None, layer_idx=None):
-        x_norm = self.ln1(x)
+        x_norm = self.ln1(x) # for non-RMS
         seq = x_norm.shape[-2]
 
         if kv_cache is not None:
@@ -493,7 +496,7 @@ class TransformerBlock(nn.Module):
        
 
         x = x + attn_out
-        x = x + self.ffn(self.ln2(x))
+        x = x + self.ffn(self.ln2(x)) # for non-RMS
         return x
 
 def run_transformer_lm(
@@ -613,7 +616,7 @@ class TransformerLM(nn.Module):
         for i, layer in enumerate(self.layers):
             x = layer(x, kv_cache=kv_cache, layer_idx=i)
         
-        x = self.ln_final(x)
+        x = self.ln_final(x) # non-RMS
         
         return self.lm_head(x) # return in logits
 
@@ -1131,3 +1134,154 @@ def run_train_bpe(
 
     t2 = time.perf_counter()
     return vocab, merges # merges is more like the rule that need to be follow during the new encoding happen so we know the "right order" how to do the
+
+
+
+
+
+import mmap
+import multiprocessing as mp
+def find_chunk_boundaries(
+    input_path: str,
+    desired_num_chunks: int,
+    split_special_token: bytes,
+) -> list[int]:
+    with open(input_path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        file_size = f.tell()
+        f.seek(0)
+
+        chunk_size = file_size // desired_num_chunks
+        boundaries = [i * chunk_size for i in range(desired_num_chunks)]
+        boundaries.append(file_size)
+
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+
+        for i in range(1, len(boundaries) - 1):
+            pos = boundaries[i]
+            found = mm.find(split_special_token, pos)
+            boundaries[i] = found if found != -1 else file_size
+
+        mm.close()
+
+    return sorted(set(boundaries))
+
+
+def _process_chunk(args: tuple[str, int, int, list[str]]) -> dict[tuple[bytes, ...], int]: # loacl word in to dict for each subchunk
+    input_path, start, end, special_tokens = args
+
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        raw = f.read(end - start)
+    text = raw.decode("utf-8", errors="ignore")
+    del raw 
+
+    if special_tokens:
+        special_pat = "|".join(re.escape(tok) for tok in special_tokens)
+        sub_chunks = re.split(special_pat, text)
+    else:
+        sub_chunks = [text]
+    del text
+
+    GPT_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    local_freqs: dict[tuple[bytes, ...], int] = defaultdict(int)
+    for sub in sub_chunks:
+        for word in re.findall(GPT_PAT, sub):
+            key = tuple(bytes([b]) for b in word.encode("utf-8"))
+            local_freqs[key] += 1
+
+    return local_freqs
+
+
+def run_train_bpe_mp(
+    input_path: str | os.PathLike,
+    vocab_size: int,
+    special_tokens: list[str],
+    num_workers: int | None = None,
+    **kwargs,
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    t0 = time.perf_counter()
+    if num_workers is None:
+        num_workers = mp.cpu_count()
+        print("Current Computer have: ", num_workers , " cores. \n")
+
+    if special_tokens:
+        split_token = special_tokens[0].encode("utf-8")
+        boundaries = find_chunk_boundaries(str(input_path), num_workers, split_token)
+    else:
+        file_size = os.path.getsize(input_path)
+        boundaries = [0, file_size]
+
+    ranges = list(zip(boundaries[:-1], boundaries[1:]))
+    args = [(str(input_path), s, e, special_tokens) for s, e in ranges]
+
+    word_freqs: dict[tuple[bytes, ...], int] = defaultdict(int)
+
+    if len(ranges) == 1:
+        local = _process_chunk(args[0])
+        for k, v in local.items():
+            word_freqs[k] += v
+    else:
+        with mp.Pool(num_workers) as pool:
+            for local in pool.imap_unordered(_process_chunk, args):
+                for k, v in local.items():
+                    word_freqs[k] += v
+                del local  
+
+    t1 = time.perf_counter()
+    print(f"pre-tokenizer (multiprocess) total time spent: {t1 - t0:.4f} seconds")
+
+    vocab: dict[int, bytes] = {}
+    idx = 0
+    for token in special_tokens:
+        vocab[idx] = token.encode("utf-8")
+        idx += 1
+    for i in range(256):
+        vocab[idx] = bytes([i])
+        idx += 1
+
+    merges: list[tuple[bytes, bytes]] = []
+    num_merges = vocab_size - len(vocab)
+
+    pair_freqs: dict[tuple[bytes, bytes], int] = defaultdict(int)
+    for word, freq in word_freqs.items():
+        for i in range(len(word) - 1):
+            pair_freqs[(word[i], word[i + 1])] += freq
+
+    for _ in range(num_merges):
+        if not pair_freqs:
+            break
+
+        best_pair = max(pair_freqs, key=lambda p: (pair_freqs[p], p))
+        merged = best_pair[0] + best_pair[1]
+
+        new_word_freqs: dict[tuple[bytes, ...], int] = defaultdict(int)
+        for word, freq in word_freqs.items():
+            new_word = []
+            i = 0
+            while i < len(word):
+                if i < len(word) - 1 and word[i] == best_pair[0] and word[i + 1] == best_pair[1]:
+                    if i > 0:
+                        pair_freqs[(new_word[-1], word[i])] -= freq
+                        pair_freqs[(new_word[-1], merged)] += freq
+                    if i + 2 < len(word):
+                        pair_freqs[(word[i + 1], word[i + 2])] -= freq
+                        pair_freqs[(merged, word[i + 2])] += freq
+                    pair_freqs[best_pair] -= freq
+
+                    new_word.append(merged)
+                    i += 2
+                else:
+                    new_word.append(word[i])
+                    i += 1
+            new_word_freqs[tuple(new_word)] += freq
+
+        word_freqs = new_word_freqs
+        merges.append(best_pair)
+        vocab[idx] = merged
+        idx += 1
+
+    t2 = time.perf_counter()
+    print(f"merge loop total time spent: {t2 - t1:.4f} seconds")
+
+    return vocab, merges

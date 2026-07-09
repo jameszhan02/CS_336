@@ -113,7 +113,7 @@ def train(model, optimizer, train_path, val_path, max_steps, log_interval, eval_
                     val_logits.reshape(batch * seq_len, vocab),
                     val_y.reshape(batch * seq_len)
                 )
-            print(f"step {step} | val loss: {val_loss.item():.4f}")
+            print(f"step {step} | val loss: {val_loss.item(F):.4f}")
             model.train()  # switch back to train mode
         
         # 6. every N steps — save checkpoint
@@ -142,15 +142,15 @@ def nucleus_sampling(probs: torch.Tensor, p: float) -> int:
     p: nucleus 
     return: 
     """
-    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True) # sort by the prob from softmax layer | return sort res and orginal idx
     
-    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1) # total prob cum with idx
     
-    sorted_probs[cumulative_probs - sorted_probs > p] = 0.0
+    sorted_probs[cumulative_probs - sorted_probs > p] = 0.0 # for top p rule we should keep util hit limit and set all rest prob to 0
     
-    sorted_probs = sorted_probs / sorted_probs.sum()
+    sorted_probs = sorted_probs / sorted_probs.sum() # re-cal the current prob
     
-    sampled_index = torch.multinomial(sorted_probs, num_samples=1).item()
+    sampled_index = torch.multinomial(sorted_probs, num_samples=1).item() # sampling form sorted_probs as distribution.
     
     return sorted_indices[sampled_index].item()
 
