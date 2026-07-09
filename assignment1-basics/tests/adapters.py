@@ -492,6 +492,7 @@ class TransformerBlock(nn.Module):
         )
 
         if kv_cache is not None:
+            print("kv_cache fired!!!!")
             kv_cache.set(layer_idx, new_kv)
        
 
