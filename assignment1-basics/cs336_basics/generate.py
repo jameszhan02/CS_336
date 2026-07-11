@@ -25,14 +25,14 @@ eos_token_id = tokenizer.encode("<|endoftext|>")[0]
 
 # batch decode.
 # TODO: 1. make sure they have same # of tokens | -> fix PAD issue later
-batch_prompt = ["write a story here: ","write a story here: ","write a story here: "]
+batch_prompt = ["lazy fox jumps on a brown dog, ","this is a story about james", "IceLand saga start from here: "]
 batch_prompt_tokens = [tokenizer.encode(prompt) for prompt in batch_prompt]
 
 
 
 output_tokens = generate(
     model=model,
-    prompt_tokens=prompt_tokens,
+    prompt_tokens=batch_prompt_tokens,
     max_new_tokens=400,
     context_length=config["context_length"],
     temperature=0.8,
@@ -40,8 +40,14 @@ output_tokens = generate(
     eos_token_id=eos_token_id,
     device=DEVICE,
 )
-generated_text = tokenizer.decode(output_tokens[len(prompt_tokens):])
 
-print(prompt)
-print("============================================================")
-print(generated_text)
+
+for i, prompt in enumerate(batch_prompt):
+    prompt_len = len(batch_prompt_tokens[i])          
+    generated_tokens = output_tokens[i][prompt_len:]   
+    generated_text = tokenizer.decode(generated_tokens) 
+
+    print(f"[{i}] Prompt: {prompt}")
+    print("=" * 60)
+    print(f"[{i}] Generated: {generated_text}")
+    print()

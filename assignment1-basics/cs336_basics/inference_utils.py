@@ -37,6 +37,25 @@ def greedy_sampling(probs: torch.Tensor) -> int:
     return torch.argmax(probs, dim=-1).item()
 
 
+def pad_batch_left(
+    prompt_tokens: list[list[int]],
+    pad_token_id: int,
+    device: str,   
+) -> tuple[list[list[int]], torch.Tensor]:
+    batch_size = len(prompt_tokens)
+    max_len = max(len(t) for t in prompt_tokens)
+
+    padded = []
+    num_left_pad = torch.zeros(batch_size, dtype=torch.long, device=device)
+
+    for i, tokens in enumerate(prompt_tokens):
+        pad_len = max_len - len(tokens)
+        padded.append([pad_token_id] * pad_len + list(tokens))
+        num_left_pad[i] = pad_len
+
+    return padded, num_left_pad
+
+
 def generate(
     model: torch.nn.Module,
     prompt_tokens: list[list[int]],
@@ -52,30 +71,32 @@ def generate(
     """
     model.eval()
     # batch_tokens = list(prompt_tokens)  # this is just a shallow copy, inside this list is still a reference list point to else where
-    batch_tokens = [list(tokens) for tokens in prompt_tokens]  
+    # batch_tokens = [list(tokens) for tokens in prompt_tokens]  
+    pad_token_id = eos_token_id  
+    padded_batch_tokens, num_left_pad = pad_batch_left(prompt_tokens, pad_token_id, device)
     # KV_cache change_5
     kv_cache = KVCache(model.num_layers)
 
     with torch.no_grad():
         # prefill: for the first time before the loop, kv_cache yet still None we fill the cache and slice logits as last dim for next token generate.
-        x = torch.tensor(batch_tokens, dtype=torch.long, device=device)
+        x = torch.tensor(padded_batch_tokens, dtype=torch.long, device=device)
         logits = model(x, kv_cache=kv_cache)
         logits = logits[:, -1, :] # [0, -1, :] -> form 0 to : since we want all batch
-        finished = [False] * len(batch_tokens)
+        finished = [False] * len(padded_batch_tokens)
         for _ in range(max_new_tokens):
             if all(finished):
                 break
             # this is the upper bound of a text can generate incluide prompt
-            if len(batch_tokens[0]) >= context_length:
+            if len(padded_batch_tokens[0]) >= context_length:
                 break
             probs = softmax_with_temperature(logits, temperature)
             next_tokens = nucleus_sampling(probs, p)
 
             # batch_tokens.append(next_token)
-            for i in range(len(batch_tokens)):
+            for i in range(len(padded_batch_tokens)):
                 if not finished[i]:
                     token_id = next_tokens[i].item()
-                    batch_tokens[i].append(token_id)
+                    padded_batch_tokens[i].append(token_id)
 
                     if eos_token_id is not None and token_id == eos_token_id:
                         finished[i] = True
@@ -85,7 +106,7 @@ def generate(
             logits = model(x, kv_cache=kv_cache)
             logits = logits[:, -1, :]
 
-    return batch_tokens
+    return padded_batch_tokens
 
 
 def generate_text(
