@@ -17,17 +17,18 @@ def softmax_with_temperature(logits: torch.Tensor, temperature: float) -> torch.
     return F.softmax(logits / temperature, dim=-1)
 
 
-def nucleus_sampling(probs: torch.Tensor, p: float) -> int:
+def nucleus_sampling(probs: torch.Tensor, p: float) -> torch.Tensor:
     """
     """
     sorted_probs, sorted_indices = torch.sort(probs, descending=True)
     cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
 
     sorted_probs = sorted_probs.masked_fill(cumulative_probs - sorted_probs > p, 0.0)
-    sorted_probs = sorted_probs / sorted_probs.sum()
+    sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
 
-    sampled_index = torch.multinomial(sorted_probs, num_samples=1).item()
-    return sorted_indices[sampled_index].item()
+    sampled_index = torch.multinomial(sorted_probs, num_samples=1)
+    next_tokens = sorted_indices.gather(dim=-1, index=sampled_index)
+    return next_tokens.squeeze(-1)
 
 
 def greedy_sampling(probs: torch.Tensor) -> int:
@@ -38,44 +39,53 @@ def greedy_sampling(probs: torch.Tensor) -> int:
 
 def generate(
     model: torch.nn.Module,
-    prompt_tokens: list[int],
+    prompt_tokens: list[list[int]],
     max_new_tokens: int,
     context_length: int,
     temperature: float = 1.0,
     p: float = 0.9,
     eos_token_id: int | None = None,
     device: str = "cpu",
-    sampling: str = "nucleus",   # "nucleus" 或 "greedy"
-) -> list[int]:
+    sampling: str = "nucleus",  
+) ->  list[list[int]]:
     """
     """
     model.eval()
-    tokens = list(prompt_tokens)    
+    # batch_tokens = list(prompt_tokens)  # this is just a shallow copy, inside this list is still a reference list point to else where
+    batch_tokens = [list(tokens) for tokens in prompt_tokens]  
     # KV_cache change_5
     kv_cache = KVCache(model.num_layers)
 
     with torch.no_grad():
         # prefill: for the first time before the loop, kv_cache yet still None we fill the cache and slice logits as last dim for next token generate.
-        x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
+        x = torch.tensor(batch_tokens, dtype=torch.long, device=device)
         logits = model(x, kv_cache=kv_cache)
-        logits = logits[0, -1, :]
+        logits = logits[:, -1, :] # [0, -1, :] -> form 0 to : since we want all batch
+        finished = [False] * len(batch_tokens)
         for _ in range(max_new_tokens):
-            # TODO: get rid of this garud with no context length limit
-            if len(tokens) >= context_length:
+            if all(finished):
+                break
+            # this is the upper bound of a text can generate incluide prompt
+            if len(batch_tokens[0]) >= context_length:
                 break
             probs = softmax_with_temperature(logits, temperature)
-            next_token = nucleus_sampling(probs, p)
-            tokens.append(next_token)
+            next_tokens = nucleus_sampling(probs, p)
 
-            if eos_token_id is not None and next_token == eos_token_id:
-                break
+            # batch_tokens.append(next_token)
+            for i in range(len(batch_tokens)):
+                if not finished[i]:
+                    token_id = next_tokens[i].item()
+                    batch_tokens[i].append(token_id)
+
+                    if eos_token_id is not None and token_id == eos_token_id:
+                        finished[i] = True
 
             # decode: over ride x with the next token only into the loop rest information already in the KV cache.
-            x = torch.tensor([[next_token]], dtype=torch.long, device=device)
+            x = next_tokens.unsqueeze(1)
             logits = model(x, kv_cache=kv_cache)
-            logits = logits[0, -1, :]
+            logits = logits[:, -1, :]
 
-    return tokens
+    return batch_tokens
 
 
 def generate_text(

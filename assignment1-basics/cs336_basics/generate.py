@@ -23,6 +23,13 @@ prompt = "This is an iceland saga, It's all start from a brave young man called 
 prompt_tokens = tokenizer.encode(prompt)
 eos_token_id = tokenizer.encode("<|endoftext|>")[0]
 
+# batch decode.
+# TODO: 1. make sure they have same # of tokens | -> fix PAD issue later
+batch_prompt = ["write a story here: ","write a story here: ","write a story here: "]
+batch_prompt_tokens = [tokenizer.encode(prompt) for prompt in batch_prompt]
+
+
+
 output_tokens = generate(
     model=model,
     prompt_tokens=prompt_tokens,
