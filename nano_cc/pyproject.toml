@@ -11,3 +11,8 @@ dependencies = [
     "rich>=15.0.0",
     "typer>=0.26.8",
 ]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+]
