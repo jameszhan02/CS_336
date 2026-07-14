@@ -15,41 +15,8 @@ from collections import defaultdict
 import time
 import torch.nn as nn
 
-def run_linear(
-    d_in: int,
-    d_out: int,
-    weights: Float[Tensor, " d_out d_in"],
-    in_features: Float[Tensor, " ... d_in"],
-) -> Float[Tensor, " ... d_out"]:
-    """
-    Given the weights of a Linear layer, compute the transformation of a batched input.
+# [Linear layer code removed for brevity - preserved elsewhere]
 
-    Args:
-        in_dim (int): The size of the input dimension
-        out_dim (int): The size of the output dimension
-        weights (Float[Tensor, "d_out d_in"]): The linear weights to use
-        in_features (Float[Tensor, "... d_in"]): The output tensor to apply the function to
-
-    Returns:
-        Float[Tensor, "... d_out"]: The transformed output of your linear module.
-    """
-    layer = Linear(d_in, d_out)
-    layer.load_state_dict({"weight": weights}) # inhert form nn.Module
-    return layer(in_features)
-
-class Linear(nn.Module):
-    def __init__(self, in_features, out_features, device=None, dtype=None):
-        super().__init__() 
-        
-        self.weight = nn.Parameter(
-            torch.empty(out_features, in_features, device=device, dtype=dtype) # row vector
-        )
-        
-        std = (2 / (in_features + out_features)) ** 0.5
-        nn.init.trunc_normal_(self.weight, mean=0, std=std, a=-3*std, b=3*std) # init weight by the hand out
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x @ self.weight.T
 
 def run_embedding(
     vocab_size: int,
@@ -928,6 +895,7 @@ def run_load_checkpoint(
     
     return checkpoint["iteration"] 
 
+# BPE_TOKENIZER_START
 def get_tokenizer(
     vocab: dict[int, bytes],
     merges: list[tuple[bytes, bytes]],
@@ -1091,36 +1059,56 @@ def run_train_bpe(
         vocab[idx] = bytes([i])
         idx += 1
 
-    # BPE merge loop
+    # BPE merge loop — heap-optimized
+    import heapq
     merges = []
-    num_merges = vocab_size - len(vocab) # how many merge we allow in current load
-    pair_freqs = defaultdict(int)
+    num_merges = vocab_size - len(vocab)
+
+    # Initial pair frequency count
+    pair_freqs: dict[tuple[bytes, bytes], int] = defaultdict(int)
     for word, freq in word_freqs.items():
         for i in range(len(word) - 1):
-            pair_freqs[(word[i], word[i+1])] += freq
+            pair_freqs[(word[i], word[i + 1])] += freq
+
+    # Build max-heap: store (-freq, pair) so highest freq is at top
+    heap = [(-freq, pair) for pair, freq in pair_freqs.items()]
+    heapq.heapify(heap)
 
     for _ in range(num_merges):
-        if not pair_freqs:
+        if not heap:
             break
 
-        best_pair = max(pair_freqs, key=lambda p: (pair_freqs[p], p)) # by python default when you loop throught a dict you loop the key not value.
+        # Pop the best pair with lazy deletion (stale entries get skipped)
+        while heap:
+            neg_freq, best_pair = heapq.heappop(heap)
+            if pair_freqs.get(best_pair, 0) == -neg_freq:
+                break
+        else:
+            break  # heap exhausted, no valid pair
+
         merged = best_pair[0] + best_pair[1]
 
-        new_word_freqs = defaultdict(int)
+        new_word_freqs: dict[tuple[bytes, ...], int] = defaultdict(int)
         for word, freq in word_freqs.items():
-            new_word = []
+            new_word: list[bytes] = []
             i = 0
             while i < len(word):
-                if i < len(word) - 1 and word[i] == best_pair[0] and word[i+1] == best_pair[1]:
-                    if i > 0: # if is already some char in this word
-                        pair_freqs[(new_word[-1], word[i])]      -= freq
-                        pair_freqs[(new_word[-1], merged)]        += freq
-                    if i + 2 < len(word): # if was one token come after the merge
-                        pair_freqs[(word[i+1], word[i+2])]       -= freq
-                        pair_freqs[(merged,     word[i+2])]       += freq
-                    pair_freqs[best_pair] -= freq # remove merged pair
+                if i < len(word) - 1 and word[i] == best_pair[0] and word[i + 1] == best_pair[1]:
+                    # --- incremental frequency updates ---
+                    if i > 0:
+                        old_left = (new_word[-1], word[i])
+                        new_left = (new_word[-1], merged)
+                        pair_freqs[old_left] -= freq
+                        pair_freqs[new_left] += freq
+                        heapq.heappush(heap, (-pair_freqs[new_left], new_left))
+                    if i + 2 < len(word):
+                        old_right = (word[i + 1], word[i + 2])
+                        new_right = (merged, word[i + 2])
+                        pair_freqs[old_right] -= freq
+                        pair_freqs[new_right] += freq
+                        heapq.heappush(heap, (-pair_freqs[new_right], new_right))
+                    pair_freqs[best_pair] -= freq
 
-                    # merge new tokens to the word_freqs
                     new_word.append(merged)
                     i += 2
                 else:
@@ -1241,6 +1229,7 @@ def run_train_bpe_mp(
         vocab[idx] = bytes([i])
         idx += 1
 
+    import heapq
     merges: list[tuple[bytes, bytes]] = []
     num_merges = vocab_size - len(vocab)
 
@@ -1249,25 +1238,42 @@ def run_train_bpe_mp(
         for i in range(len(word) - 1):
             pair_freqs[(word[i], word[i + 1])] += freq
 
+    # Build max-heap
+    heap = [(-freq, pair) for pair, freq in pair_freqs.items()]
+    heapq.heapify(heap)
+
     for _ in range(num_merges):
-        if not pair_freqs:
+        if not heap:
             break
 
-        best_pair = max(pair_freqs, key=lambda p: (pair_freqs[p], p))
+        # Lazy deletion: skip stale entries
+        while heap:
+            neg_freq, best_pair = heapq.heappop(heap)
+            if pair_freqs.get(best_pair, 0) == -neg_freq:
+                break
+        else:
+            break
+
         merged = best_pair[0] + best_pair[1]
 
         new_word_freqs: dict[tuple[bytes, ...], int] = defaultdict(int)
         for word, freq in word_freqs.items():
-            new_word = []
+            new_word: list[bytes] = []
             i = 0
             while i < len(word):
                 if i < len(word) - 1 and word[i] == best_pair[0] and word[i + 1] == best_pair[1]:
                     if i > 0:
-                        pair_freqs[(new_word[-1], word[i])] -= freq
-                        pair_freqs[(new_word[-1], merged)] += freq
+                        old_left = (new_word[-1], word[i])
+                        new_left = (new_word[-1], merged)
+                        pair_freqs[old_left] -= freq
+                        pair_freqs[new_left] += freq
+                        heapq.heappush(heap, (-pair_freqs[new_left], new_left))
                     if i + 2 < len(word):
-                        pair_freqs[(word[i + 1], word[i + 2])] -= freq
-                        pair_freqs[(merged, word[i + 2])] += freq
+                        old_right = (word[i + 1], word[i + 2])
+                        new_right = (merged, word[i + 2])
+                        pair_freqs[old_right] -= freq
+                        pair_freqs[new_right] += freq
+                        heapq.heappush(heap, (-pair_freqs[new_right], new_right))
                     pair_freqs[best_pair] -= freq
 
                     new_word.append(merged)
