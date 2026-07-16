@@ -15,7 +15,42 @@ from collections import defaultdict
 import time
 import torch.nn as nn
 
-# [Linear layer code removed for brevity - preserved elsewhere]
+def run_linear(
+    d_in: int,
+    d_out: int,
+    weights: Float[Tensor, " d_out d_in"],
+    in_features: Float[Tensor, " ... d_in"],
+) -> Float[Tensor, " ... d_out"]:
+    """
+    Given the weights of a Linear layer, compute the transformation of a batched input.
+
+    Args:
+        in_dim (int): The size of the input dimension
+        out_dim (int): The size of the output dimension
+        weights (Float[Tensor, "d_out d_in"]): The linear weights to use
+        in_features (Float[Tensor, "... d_in"]): The output tensor to apply the function to
+
+    Returns:
+        Float[Tensor, "... d_out"]: The transformed output of your linear module.
+    """
+    layer = Linear(d_in, d_out)
+    layer.load_state_dict({"weight": weights}) # inhert form nn.Module
+    return layer(in_features)
+
+
+class Linear(nn.Module):
+    def __init__(self, in_features, out_features, device=None, dtype=None):
+        super().__init__()
+
+        self.weight = nn.Parameter(
+            torch.empty(out_features, in_features, device=device, dtype=dtype) # row vector
+        )
+
+        std = (2 / (in_features + out_features)) ** 0.5
+        nn.init.trunc_normal_(self.weight, mean=0, std=std, a=-3*std, b=3*std) # init weight by the hand out
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x @ self.weight.T
 
 
 def run_embedding(
